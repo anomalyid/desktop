@@ -1,47 +1,261 @@
-name: RDP-Tailscale
+name: RDP
 
 on:
   workflow_dispatch:
     inputs:
-      tailscale_authkey:
-        description: 'Tailscale Auth Key (dari admin console)'
+      windows_version:
+        description: 'Windows Version'
         required: true
+        default: 'windows-latest'
+        type: choice
+        options:
+          - windows-latest
+          - windows-2025
+          - windows-2022
+
+      username:
+        description: 'Username (menggantikan runneradmin, 3-20 karakter)'
+        required: true
+        default: 'admin'
+
       password:
-        description: 'Password RDP (min 8 char, kompleks)'
+        description: 'Password (min 8 char, 3 dari: besar/kecil/angka/simbol, tanpa username)'
         required: true
         default: 'Rdp#2025x'
 
+      tailscale_authkey:
+        description: 'Tailscale Auth Key (wajib, dari admin console)'
+        required: true
+
+      notify_channel:
+        description: 'Notification Channel'
+        required: true
+        default: 'None'
+        type: choice
+        options:
+          - 'None'
+          - 'Telegram'
+          - 'Discord'
+
+      telegram_bot_token:
+        description: 'Telegram Bot Token (isi jika pilih Telegram)'
+        required: false
+        default: ''
+
+      telegram_chat_id:
+        description: 'Telegram Chat ID (isi jika pilih Telegram)'
+        required: false
+        default: ''
+
+      discord_webhook:
+        description: 'Discord Webhook URL (isi jika pilih Discord)'
+        required: false
+        default: ''
+
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ${{ github.event.inputs.windows_version }}
     timeout-minutes: 350
+
     steps:
-      - name: Enable RDP & Set Password
+      - name: Validate inputs
+        shell: pwsh
+        run: |
+          $user = "${{ github.event.inputs.username }}"
+          $pass = "${{ github.event.inputs.password }}"
+          $tskey = "${{ github.event.inputs.tailscale_authkey }}"
+          $channel = "${{ github.event.inputs.notify_channel }}"
+
+          if ($user -notmatch '^[a-zA-Z0-9._-]{3,20}$') {
+            Write-Error "Username tidak valid. Hanya huruf, angka, titik, underscore, strip. 3-20 karakter."
+            exit 1
+          }
+          if ($pass.Length -lt 8) {
+            Write-Error "Password minimal 8 karakter (kebijakan Windows)."
+            exit 1
+          }
+          $hasUpper  = $pass -cmatch '[A-Z]'
+          $hasLower  = $pass -cmatch '[a-z]'
+          $hasDigit  = $pass -match '[0-9]'
+          $hasSymbol = $pass -match '[^a-zA-Z0-9]'
+          $categories = @($hasUpper, $hasLower, $hasDigit, $hasSymbol) | Where-Object { $_ }
+          if ($categories.Count -lt 3) {
+            Write-Error "Password harus punya minimal 3 dari: huruf besar, huruf kecil, angka, simbol."
+            exit 1
+          }
+          if ($pass -match [regex]::Escape($user)) {
+            Write-Error "Password tidak boleh mengandung username."
+            exit 1
+          }
+          if (-not $tskey) {
+            Write-Error "Tailscale auth key wajib diisi."
+            exit 1
+          }
+          if ($channel -eq "Telegram" -and (-not "${{ github.event.inputs.telegram_bot_token }}" -or -not "${{ github.event.inputs.telegram_chat_id }}")) {
+            Write-Error "Pilih Telegram tapi bot token / chat id kosong."
+            exit 1
+          }
+          if ($channel -eq "Discord" -and -not "${{ github.event.inputs.discord_webhook }}") {
+            Write-Error "Pilih Discord tapi webhook kosong."
+            exit 1
+          }
+          Write-Host "Input valid. user=$user pass_len=$($pass.Length) channel=$channel"
+
+      - name: Enable RDP
         shell: pwsh
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString "${{ github.event.inputs.password }}" -AsPlainText -Force)
-          Add-LocalGroupMember -Group "Administrators" -Member "runneradmin"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+          Write-Host "RDP enabled on port 3389"
+
+      - name: Rename user
+        shell: pwsh
+        run: |
+          $newUser = "${{ github.event.inputs.username }}"
+          if ($newUser -ne "runneradmin") {
+            if (Get-LocalUser -Name $newUser -ErrorAction SilentlyContinue) {
+              Write-Host "User $newUser already exists, skipping rename"
+            } else {
+              Rename-LocalUser -Name "runneradmin" -NewName $newUser
+              Write-Host "Renamed runneradmin -> $newUser"
+            }
+          } else {
+            Write-Host "Keeping default runneradmin"
+          }
+
+      - name: Set password
+        shell: pwsh
+        run: |
+          $user = "${{ github.event.inputs.username }}"
+          $pass = ConvertTo-SecureString -AsPlainText "${{ github.event.inputs.password }}" -Force
+          Set-LocalUser -Name $user -Password $pass
+          Set-LocalUser -Name $user -PasswordNeverExpires $true
+          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
+          Write-Host "Password set and user added to Administrators"
 
       - name: Install Tailscale
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale-setup.exe"
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
+          Invoke-WebRequest -Uri $url -OutFile tailscale-setup.exe -UseBasicParsing
           Start-Process -FilePath ".\tailscale-setup.exe" -ArgumentList "/quiet" -Wait
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey ${{ github.event.inputs.tailscale_authkey }} --hostname "gh-rdp-runner" --accept-routes
+          Write-Host "Tailscale installed"
 
-      - name: Show Tailscale IP
+      - name: Connect Tailscale
+        id: tailscale
         shell: pwsh
         run: |
-          $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-          Write-Host "========================================"
-          Write-Host "RDP Host (Tailscale IP): $ip"
-          Write-Host "Username: runneradmin"
-          Write-Host "Password: ${{ github.event.inputs.password }}"
-          Write-Host "========================================"
-          Write-Host "Connect via Windows App to $ip"
+          $exe = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "tailscale.exe tidak ditemukan setelah instalasi"
+            exit 1
+          }
 
-      - name: Keep Alive
+          & $exe up --authkey "${{ github.event.inputs.tailscale_authkey }}" --hostname "gh-rdp-runner" --accept-routes
+
+          # Tunggu IP muncul
+          $ip = $null
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 2
+            $ip = & $exe ip -4 2>$null
+            if ($ip) { break }
+          }
+
+          if (-not $ip) {
+            Write-Error "Tailscale IP tidak didapat setelah 60s"
+            exit 1
+          }
+
+          $ip = ($ip | Select-Object -First 1).Trim()
+          Write-Host "Tailscale IP: $ip"
+          "TS_IP=$ip" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Print connection info
         shell: pwsh
-        run: Start-Sleep -Seconds 19800
+        run: |
+          $ip = "${{ steps.tailscale.outputs.TS_IP }}"
+          Write-Host "========================================"
+          Write-Host "      RDP CONNECTION DETAILS"
+          Write-Host "========================================"
+          Write-Host "  Host     : $ip"
+          Write-Host "  Username : ${{ github.event.inputs.username }}"
+          Write-Host "  Password : ${{ github.event.inputs.password }}"
+          Write-Host "----------------------------------------"
+          Write-Host "  Windows  : ${{ github.event.inputs.windows_version }}"
+          Write-Host "  Expires  : 5 hours 50 minutes from now"
+          Write-Host "  Network  : Tailscale (private)"
+          Write-Host "========================================"
+          Write-Host ""
+          Write-Host "How to connect:"
+          Write-Host "  1. Pastikan Tailscale di komputermu sudah login"
+          Write-Host "  2. Windows App -> Add PC -> $ip"
+          Write-Host "  3. Username & password di atas"
+          Write-Host "========================================"
+
+      - name: Send Telegram notification
+        if: ${{ github.event.inputs.notify_channel == 'Telegram' }}
+        shell: pwsh
+        run: |
+          $text = @"
+          *RDP Ready (Tailscale)*
+
+          Host: ``${{ steps.tailscale.outputs.TS_IP }}``
+          Username: ``${{ github.event.inputs.username }}``
+          Password: ``${{ github.event.inputs.password }}``
+          Windows: ${{ github.event.inputs.windows_version }}
+          Expires: ~5h 50m
+
+          Pastikan Tailscale di perangkatmu sudah login.
+          "@
+
+          $body = @{
+            chat_id = "${{ github.event.inputs.telegram_chat_id }}"
+            text = $text
+            parse_mode = "Markdown"
+          } | ConvertTo-Json
+
+          try {
+            Invoke-RestMethod -Uri "https://api.telegram.org/bot${{ github.event.inputs.telegram_bot_token }}/sendMessage" `
+              -Method Post `
+              -ContentType "application/json" `
+              -Body $body | Out-Null
+            Write-Host "Telegram notification sent"
+          } catch {
+            Write-Host "Telegram failed: $($_.Exception.Message)"
+          }
+
+      - name: Send Discord notification
+        if: ${{ github.event.inputs.notify_channel == 'Discord' }}
+        shell: pwsh
+        run: |
+          $content = @"
+          **RDP Ready (Tailscale)**
+
+          Host: ``${{ steps.tailscale.outputs.TS_IP }}``
+          Username: ``${{ github.event.inputs.username }}``
+          Password: ``${{ github.event.inputs.password }}``
+          Windows: ${{ github.event.inputs.windows_version }}
+          Expires: ~5h 50m
+
+          Pastikan Tailscale di perangkatmu sudah login.
+          "@
+
+          $body = @{ content = $content } | ConvertTo-Json
+
+          try {
+            Invoke-RestMethod -Uri "${{ github.event.inputs.discord_webhook }}" `
+              -Method Post `
+              -ContentType "application/json" `
+              -Body $body | Out-Null
+            Write-Host "Discord notification sent"
+          } catch {
+            Write-Host "Discord failed: $($_.Exception.Message)"
+          }
+
+      - name: Keep alive
+        shell: pwsh
+        run: |
+          Write-Host "Session active. RDP will remain available for ~5h 50m."
+          Write-Host "Host: ${{ steps.tailscale.outputs.TS_IP }}"
+          Start-Sleep -Seconds 19800
