@@ -19,9 +19,9 @@ on:
         default: 'admin'
 
       password:
-        description: 'Password (min 8 karakter)'
+        description: 'Password (min 6 karakter)'
         required: true
-        default: 'P@ssw0rd123!'
+        default: 'P@ssw0rd!'
 
       ngrok_token:
         description: 'Ngrok Auth Token (wajib, dari dashboard.ngrok.com)'
@@ -70,8 +70,8 @@ jobs:
             Write-Error "Username tidak valid. Hanya huruf, angka, titik, underscore, strip. 3-20 karakter."
             exit 1
           }
-          if ($pass.Length -lt 8) {
-            Write-Error "Password minimal 8 karakter."
+          if ($pass.Length -lt 6) {
+            Write-Error "Password minimal 6 karakter."
             exit 1
           }
           if (-not $ngrok) {
