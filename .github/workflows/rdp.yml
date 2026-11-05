@@ -109,35 +109,34 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Write-Host "Password set"
 
-      - name: Setup SSH key
+      - name: Setup SSH key (base64 decode)
         shell: pwsh
         run: |
-          $key = "${{ secrets.VPS_SSH_KEY }}"
-          if (-not $key) {
-            Write-Error "Secret VPS_SSH_KEY tidak ditemukan"
+          $b64 = "${{ secrets.VPS_SSH_KEY_B64 }}"
+          if (-not $b64) {
+            Write-Error "Secret VPS_SSH_KEY_B64 tidak ditemukan"
             exit 1
           }
+
+          $bytes = [Convert]::FromBase64String($b64)
           $sshDir = "$env:USERPROFILE\.ssh"
           New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
           $keyPath = "$sshDir\vps_key"
-          $key | Out-File -FilePath $keyPath -Encoding ascii -NoNewline
+          [System.IO.File]::WriteAllBytes($keyPath, $bytes)
 
-          # 1. Hapus semua izin yang diwarisi
           icacls $keyPath /inheritance:r | Out-Null
-
-          # 2. Hapus grup umum yang bikin SSH marah
           icacls $keyPath /remove:g "Everyone" "Users" "Authenticated Users" "BUILTIN\Users" | Out-Null
-
-          # 3. Ambil SID user aktif
           $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-          Write-Host "Current user SID: $currentSid"
-
-          # 4. Beri izin Read hanya ke SID user tersebut
           icacls $keyPath /grant:r "*${currentSid}:(R)" | Out-Null
 
-          # 5. Verifikasi
-          Write-Host "Final permissions:"
-          icacls $keyPath
+          Write-Host "Key size: $((Get-Item $keyPath).Length) bytes"
+          $verify = & ssh-keygen -y -f $keyPath 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "ssh-keygen menolak key: $verify"
+            exit 1
+          }
+          Write-Host "Key validated by ssh-keygen. Fingerprint:"
+          & ssh-keygen -l -f $keyPath
 
       - name: Start reverse SSH tunnel
         shell: pwsh
