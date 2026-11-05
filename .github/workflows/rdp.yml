@@ -122,10 +122,22 @@ jobs:
           $keyPath = "$sshDir\vps_key"
           $key | Out-File -FilePath $keyPath -Encoding ascii -NoNewline
 
-          # Pakai SID universal *S-1-1-0 (Everyone) untuk hindari error mapping nama user
-          icacls $keyPath /inheritance:r /grant:r "*S-1-1-0:R" | Out-Null
+          # 1. Hapus semua izin yang diwarisi
+          icacls $keyPath /inheritance:r | Out-Null
 
-          Write-Host "SSH key written to $keyPath"
+          # 2. Hapus grup umum yang bikin SSH marah
+          icacls $keyPath /remove:g "Everyone" "Users" "Authenticated Users" "BUILTIN\Users" | Out-Null
+
+          # 3. Ambil SID user aktif
+          $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          Write-Host "Current user SID: $currentSid"
+
+          # 4. Beri izin Read hanya ke SID user tersebut
+          icacls $keyPath /grant:r "*${currentSid}:(R)" | Out-Null
+
+          # 5. Verifikasi
+          Write-Host "Final permissions:"
+          icacls $keyPath
 
       - name: Start reverse SSH tunnel
         shell: pwsh
