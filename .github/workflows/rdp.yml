@@ -1,4 +1,4 @@
-name: RDP
+name: RDP via VPS
 
 on:
   workflow_dispatch:
@@ -14,39 +14,32 @@ on:
           - windows-2022
 
       username:
-        description: 'Username (menggantikan runneradmin, 3-20 karakter)'
+        description: 'RDP Username (3-20 karakter)'
         required: true
         default: 'admin'
 
       password:
-        description: 'Password (min 8 char, 3 dari: besar/kecil/angka/simbol, tanpa username)'
+        description: 'RDP Password (min 8 char, kompleks)'
         required: true
         default: 'Rdp#2025x'
 
-      notify_channel:
-        description: 'Notification Channel'
+      vps_host:
+        description: 'VPS Hostname / IP'
         required: true
-        default: 'None'
-        type: choice
-        options:
-          - 'None'
-          - 'Telegram'
-          - 'Discord'
 
-      telegram_bot_token:
-        description: 'Telegram Bot Token (isi jika pilih Telegram)'
-        required: false
-        default: ''
+      vps_user:
+        description: 'VPS SSH Username'
+        required: true
 
-      telegram_chat_id:
-        description: 'Telegram Chat ID (isi jika pilih Telegram)'
-        required: false
-        default: ''
+      vps_ssh_port:
+        description: 'VPS SSH Port'
+        required: true
+        default: '22'
 
-      discord_webhook:
-        description: 'Discord Webhook URL (isi jika pilih Discord)'
-        required: false
-        default: ''
+      remote_port:
+        description: 'Port publik di VPS untuk RDP (harus terbuka)'
+        required: true
+        default: '13389'
 
 jobs:
   build:
@@ -59,14 +52,13 @@ jobs:
         run: |
           $user = "${{ github.event.inputs.username }}"
           $pass = "${{ github.event.inputs.password }}"
-          $channel = "${{ github.event.inputs.notify_channel }}"
 
           if ($user -notmatch '^[a-zA-Z0-9._-]{3,20}$') {
             Write-Error "Username tidak valid. Hanya huruf, angka, titik, underscore, strip. 3-20 karakter."
             exit 1
           }
           if ($pass.Length -lt 8) {
-            Write-Error "Password minimal 8 karakter (kebijakan Windows)."
+            Write-Error "Password minimal 8 karakter."
             exit 1
           }
           $hasUpper  = $pass -cmatch '[A-Z]'
@@ -82,15 +74,7 @@ jobs:
             Write-Error "Password tidak boleh mengandung username."
             exit 1
           }
-          if ($channel -eq "Telegram" -and (-not "${{ github.event.inputs.telegram_bot_token }}" -or -not "${{ github.event.inputs.telegram_chat_id }}")) {
-            Write-Error "Pilih Telegram tapi bot token / chat id kosong."
-            exit 1
-          }
-          if ($channel -eq "Discord" -and -not "${{ github.event.inputs.discord_webhook }}") {
-            Write-Error "Pilih Discord tapi webhook kosong."
-            exit 1
-          }
-          Write-Host "Input valid. user=$user pass_len=$($pass.Length) channel=$channel"
+          Write-Host "Input valid. user=$user pass_len=$($pass.Length)"
 
       - name: Enable RDP
         shell: pwsh
@@ -106,7 +90,7 @@ jobs:
           $newUser = "${{ github.event.inputs.username }}"
           if ($newUser -ne "runneradmin") {
             if (Get-LocalUser -Name $newUser -ErrorAction SilentlyContinue) {
-              Write-Host "User $newUser already exists, skipping rename"
+              Write-Host "User $newUser already exists"
             } else {
               Rename-LocalUser -Name "runneradmin" -NewName $newUser
               Write-Host "Renamed runneradmin -> $newUser"
@@ -123,137 +107,93 @@ jobs:
           Set-LocalUser -Name $user -Password $pass
           Set-LocalUser -Name $user -PasswordNeverExpires $true
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
-          Write-Host "Password set and user added to Administrators"
+          Write-Host "Password set"
 
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v3
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
-          args: --hostname=gh-rdp-runner --accept-routes
-
-      - name: Refresh PATH
+      - name: Setup SSH key
         shell: pwsh
         run: |
-          $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
-          $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
-          $env:Path = "$machinePath;$userPath"
-          Write-Host "PATH updated."
-          Get-Command tailscale -ErrorAction SilentlyContinue
-
-      - name: Get Tailscale IP
-        id: tailscale
-        shell: pwsh
-        run: |
-          $exe = "C:\Program Files\Tailscale\tailscale.exe"
-          if (-not (Test-Path $exe)) {
-            $exe = "C:\Program Files (x86)\Tailscale\tailscale.exe"
+          $key = "${{ secrets.VPS_SSH_KEY }}"
+          if (-not $key) {
+            Write-Error "Secret VPS_SSH_KEY tidak ditemukan"
+            exit 1
           }
-          if (-not (Test-Path $exe)) {
-            Write-Error "tailscale.exe tidak ditemukan di lokasi mana pun"
+          $sshDir = "$env:USERPROFILE\.ssh"
+          New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
+          $keyPath = "$sshDir\vps_key"
+          $key | Out-File -FilePath $keyPath -Encoding ascii -NoNewline
+          icacls $keyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
+          Write-Host "SSH key written to $keyPath"
+
+      - name: Start reverse SSH tunnel
+        shell: pwsh
+        run: |
+          $sshArgs = @(
+            "-N",
+            "-R", "${{ github.event.inputs.remote_port }}:localhost:3389",
+            "-p", "${{ github.event.inputs.vps_ssh_port }}",
+            "-i", "$env:USERPROFILE\.ssh\vps_key",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=NUL",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+            "-o", "ExitOnForwardFailure=yes",
+            "${{ github.event.inputs.vps_user }}@${{ github.event.inputs.vps_host }}"
+          )
+
+          # Cek ssh tersedia
+          if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
+            Write-Error "SSH client tidak ditemukan di runner"
             exit 1
           }
 
-          $ip = $null
-          for ($i = 0; $i -lt 30; $i++) {
-            Start-Sleep -Seconds 2
-            $ip = & $exe ip -4 2>$null
-            if ($ip) { break }
-          }
-          if (-not $ip) {
-            Write-Error "Tailscale IP tidak didapat setelah 60s"
+          Write-Host "Starting reverse tunnel..."
+          $proc = Start-Process -FilePath "ssh" -ArgumentList $sshArgs -PassThru -NoNewWindow
+
+          # Tunggu 10 detik, cek masih hidup
+          Start-Sleep -Seconds 10
+          if ($proc.HasExited) {
+            Write-Error "SSH tunnel gagal start (exit code: $($proc.ExitCode))"
             exit 1
           }
-          $ip = ($ip | Select-Object -First 1).Trim()
-          Write-Host "Tailscale IP: $ip"
-          "TS_IP=$ip" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "SSH tunnel aktif (PID: $($proc.Id))"
+          $proc.Id | Out-File -FilePath "$env:TEMP\ssh.pid" -Encoding ascii
 
       - name: Print connection info
         shell: pwsh
         run: |
-          $ip = "${{ steps.tailscale.outputs.TS_IP }}"
           Write-Host "========================================"
           Write-Host "      RDP CONNECTION DETAILS"
           Write-Host "========================================"
-          Write-Host "  Host     : $ip"
+          Write-Host "  Host     : ${{ github.event.inputs.vps_host }}:${{ github.event.inputs.remote_port }}"
           Write-Host "  Username : ${{ github.event.inputs.username }}"
           Write-Host "  Password : ${{ github.event.inputs.password }}"
           Write-Host "----------------------------------------"
           Write-Host "  Windows  : ${{ github.event.inputs.windows_version }}"
           Write-Host "  Expires  : 5 hours 50 minutes from now"
-          Write-Host "  Network  : Tailscale (private)"
+          Write-Host "  Route    : Windows App -> VPS -> Runner"
           Write-Host "========================================"
           Write-Host ""
-          Write-Host "How to connect:"
-          Write-Host "  1. Pastikan Tailscale di komputermu sudah login"
-          Write-Host "  2. Windows App -> Add PC -> $ip"
+          Write-Host "Langkah connect:"
+          Write-Host "  1. Buka Windows App / mstsc"
+          Write-Host "  2. PC name: ${{ github.event.inputs.vps_host }}:${{ github.event.inputs.remote_port }}"
           Write-Host "  3. Username & password di atas"
           Write-Host "========================================"
 
-      - name: Send Telegram notification
-        if: ${{ github.event.inputs.notify_channel == 'Telegram' }}
+      - name: Monitor tunnel
         shell: pwsh
         run: |
-          $text = @"
-          *RDP Ready (Tailscale)*
-
-          Host: ``${{ steps.tailscale.outputs.TS_IP }}``
-          Username: ``${{ github.event.inputs.username }}``
-          Password: ``${{ github.event.inputs.password }}``
-          Windows: ${{ github.event.inputs.windows_version }}
-          Expires: ~5h 50m
-
-          Pastikan Tailscale di perangkatmu sudah login.
-          "@
-
-          $body = @{
-            chat_id = "${{ github.event.inputs.telegram_chat_id }}"
-            text = $text
-            parse_mode = "Markdown"
-          } | ConvertTo-Json
-
-          try {
-            Invoke-RestMethod -Uri "https://api.telegram.org/bot${{ github.event.inputs.telegram_bot_token }}/sendMessage" `
-              -Method Post `
-              -ContentType "application/json" `
-              -Body $body | Out-Null
-            Write-Host "Telegram notification sent"
-          } catch {
-            Write-Host "Telegram failed: $($_.Exception.Message)"
+          Write-Host "Memantau tunnel selama ~5h 50m..."
+          $pidFile = "$env:TEMP\ssh.pid"
+          for ($i = 0; $i -lt 350; $i++) {
+            Start-Sleep -Seconds 60
+            if (-not (Test-Path $pidFile)) { break }
+            $tunnelPid = Get-Content $pidFile
+            $proc = Get-Process -Id $tunnelPid -ErrorAction SilentlyContinue
+            if (-not $proc) {
+              Write-Error "SSH tunnel mati pada menit ke-$i. Runner akan berhenti."
+              exit 1
+            }
+            if ($i % 10 -eq 0) {
+              Write-Host "[$i min] Tunnel masih aktif (PID: $tunnelPid)"
+            }
           }
-
-      - name: Send Discord notification
-        if: ${{ github.event.inputs.notify_channel == 'Discord' }}
-        shell: pwsh
-        run: |
-          $content = @"
-          **RDP Ready (Tailscale)**
-
-          Host: ``${{ steps.tailscale.outputs.TS_IP }}``
-          Username: ``${{ github.event.inputs.username }}``
-          Password: ``${{ github.event.inputs.password }}``
-          Windows: ${{ github.event.inputs.windows_version }}
-          Expires: ~5h 50m
-
-          Pastikan Tailscale di perangkatmu sudah login.
-          "@
-
-          $body = @{ content = $content } | ConvertTo-Json
-
-          try {
-            Invoke-RestMethod -Uri "${{ github.event.inputs.discord_webhook }}" `
-              -Method Post `
-              -ContentType "application/json" `
-              -Body $body | Out-Null
-            Write-Host "Discord notification sent"
-          } catch {
-            Write-Host "Discord failed: $($_.Exception.Message)"
-          }
-
-      - name: Keep alive
-        shell: pwsh
-        run: |
-          Write-Host "Session active. RDP will remain available for ~5h 50m."
-          Write-Host "Host: ${{ steps.tailscale.outputs.TS_IP }}"
-          Start-Sleep -Seconds 19800
