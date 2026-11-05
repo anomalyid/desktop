@@ -134,30 +134,40 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Write-Host "Password set and user added to Administrators"
 
-      - name: Install Tailscale via winget
+      - name: Install Tailscale (direct amd64 MSI)
         shell: pwsh
         run: |
-          # Pastikan winget tersedia
-          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-            Write-Error "winget tidak tersedia di runner ini"
+          # Unduh MSI amd64 langsung dari Tailscale, bukan via winget
+          $msiUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $msiPath = "$env:TEMP\tailscale-amd64.msi"
+          Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+          Write-Host "Downloaded MSI: $((Get-Item $msiPath).Length) bytes"
+
+          # Install silent dengan parameter yang benar
+          $args = @(
+            "/i", "`"$msiPath`"",
+            "/qn", "/norestart",
+            "TS_NOLAUNCH=1",
+            "TS_UNATTENDEDMODE=always"
+          )
+          $p = Start-Process msiexec.exe -ArgumentList $args -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Write-Error "MSI install failed with exit code $($p.ExitCode)"
             exit 1
           }
 
-          # Install Tailscale (winget memilih arsitektur yang benar)
-          winget install -e --id Tailscale.Tailscale --silent --accept-package-agreements --accept-source-agreements
-
-          # Verifikasi lokasi tailscale.exe
+          # Verifikasi path
           $exe = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $exe)) {
             $alt = "C:\Program Files (x86)\Tailscale\tailscale.exe"
             if (Test-Path $alt) {
               Write-Host "Ditemukan di lokasi alternatif: $alt"
             } else {
-              Write-Error "tailscale.exe tidak ditemukan setelah winget install"
+              Write-Error "tailscale.exe tidak ditemukan setelah instalasi MSI"
               exit 1
             }
           }
-          Write-Host "Tailscale terinstall via winget"
+          Write-Host "Tailscale terinstall via MSI amd64"
 
       - name: Connect Tailscale
         id: tailscale
