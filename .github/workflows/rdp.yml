@@ -135,12 +135,33 @@ jobs:
           Write-Host "Password set and user added to Administrators"
 
       - name: Install Tailscale
-        shell: pwsh
-        run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
-          Invoke-WebRequest -Uri $url -OutFile tailscale-setup.exe -UseBasicParsing
-          Start-Process -FilePath ".\tailscale-setup.exe" -ArgumentList "/quiet" -Wait
-          Write-Host "Tailscale installed"
+  shell: pwsh
+  run: |
+    $msiUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+    $msiPath = "$env:TEMP\tailscale.msi"
+    Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+
+    # Install via msiexec dengan silent switches yang benar
+    $p = Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /quiet /norestart TS_NOLAUNCH=1" -Wait -PassThru
+    if ($p.ExitCode -ne 0) {
+      Write-Error "MSI install failed with exit code $($p.ExitCode)"
+      exit 1
+    }
+
+    # Verifikasi bahwa tailscale.exe benar-benar ada
+    $exe = "C:\Program Files\Tailscale\tailscale.exe"
+    if (-not (Test-Path $exe)) {
+      Write-Error "tailscale.exe masih tidak ditemukan setelah instalasi MSI"
+      # Coba cek lokasi alternatif (x86)
+      $alt = "C:\Program Files (x86)\Tailscale\tailscale.exe"
+      if (Test-Path $alt) {
+        Write-Host "Ditemukan di lokasi alternatif: $alt"
+        $exe = $alt
+      } else {
+        exit 1
+      }
+    }
+    Write-Host "Tailscale terinstall di: $exe"
 
       - name: Connect Tailscale
         id: tailscale
