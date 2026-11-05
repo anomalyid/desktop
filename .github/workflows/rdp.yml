@@ -135,33 +135,29 @@ jobs:
           Write-Host "Password set and user added to Administrators"
 
       - name: Install Tailscale
-  shell: pwsh
-  run: |
-    $msiUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-    $msiPath = "$env:TEMP\tailscale.msi"
-    Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+        shell: pwsh
+        run: |
+          $msiUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $msiPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
 
-    # Install via msiexec dengan silent switches yang benar
-    $p = Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /quiet /norestart TS_NOLAUNCH=1" -Wait -PassThru
-    if ($p.ExitCode -ne 0) {
-      Write-Error "MSI install failed with exit code $($p.ExitCode)"
-      exit 1
-    }
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /quiet /norestart TS_UNATTENTEDMODE=always" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Write-Error "MSI install failed with exit code $($p.ExitCode)"
+            exit 1
+          }
 
-    # Verifikasi bahwa tailscale.exe benar-benar ada
-    $exe = "C:\Program Files\Tailscale\tailscale.exe"
-    if (-not (Test-Path $exe)) {
-      Write-Error "tailscale.exe masih tidak ditemukan setelah instalasi MSI"
-      # Coba cek lokasi alternatif (x86)
-      $alt = "C:\Program Files (x86)\Tailscale\tailscale.exe"
-      if (Test-Path $alt) {
-        Write-Host "Ditemukan di lokasi alternatif: $alt"
-        $exe = $alt
-      } else {
-        exit 1
-      }
-    }
-    Write-Host "Tailscale terinstall di: $exe"
+          $exe = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $exe)) {
+            $alt = "C:\Program Files (x86)\Tailscale\tailscale.exe"
+            if (Test-Path $alt) {
+              Write-Host "Ditemukan di lokasi alternatif: $alt"
+            } else {
+              Write-Error "tailscale.exe tidak ditemukan setelah instalasi MSI"
+              exit 1
+            }
+          }
+          Write-Host "Tailscale terinstall"
 
       - name: Connect Tailscale
         id: tailscale
@@ -169,13 +165,15 @@ jobs:
         run: |
           $exe = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $exe)) {
-            Write-Error "tailscale.exe tidak ditemukan setelah instalasi"
+            $exe = "C:\Program Files (x86)\Tailscale\tailscale.exe"
+          }
+          if (-not (Test-Path $exe)) {
+            Write-Error "tailscale.exe tidak ditemukan di lokasi mana pun"
             exit 1
           }
 
-          & $exe up --authkey "${{ github.event.inputs.tailscale_authkey }}" --hostname "gh-rdp-runner" --accept-routes
+          & $exe up --authkey "${{ github.event.inputs.tailscale_authkey }}" --hostname "gh-rdp-runner" --accept-routes --unattended
 
-          # Tunggu IP muncul
           $ip = $null
           for ($i = 0; $i -lt 30; $i++) {
             Start-Sleep -Seconds 2
