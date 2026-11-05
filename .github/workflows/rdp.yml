@@ -37,7 +37,7 @@ on:
         default: '22'
 
       remote_port:
-        description: 'Port publik di VPS untuk RDP (harus terbuka)'
+        description: 'Port publik di VPS untuk RDP (harus terbuka TCP)'
         required: true
         default: '13389'
 
@@ -121,7 +121,10 @@ jobs:
           New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
           $keyPath = "$sshDir\vps_key"
           $key | Out-File -FilePath $keyPath -Encoding ascii -NoNewline
-          icacls $keyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
+
+          # Pakai SID universal *S-1-1-0 (Everyone) untuk hindari error mapping nama user
+          icacls $keyPath /inheritance:r /grant:r "*S-1-1-0:R" | Out-Null
+
           Write-Host "SSH key written to $keyPath"
 
       - name: Start reverse SSH tunnel
@@ -140,7 +143,6 @@ jobs:
             "${{ github.event.inputs.vps_user }}@${{ github.event.inputs.vps_host }}"
           )
 
-          # Cek ssh tersedia
           if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
             Write-Error "SSH client tidak ditemukan di runner"
             exit 1
@@ -149,7 +151,6 @@ jobs:
           Write-Host "Starting reverse tunnel..."
           $proc = Start-Process -FilePath "ssh" -ArgumentList $sshArgs -PassThru -NoNewWindow
 
-          # Tunggu 10 detik, cek masih hidup
           Start-Sleep -Seconds 10
           if ($proc.HasExited) {
             Write-Error "SSH tunnel gagal start (exit code: $($proc.ExitCode))"
