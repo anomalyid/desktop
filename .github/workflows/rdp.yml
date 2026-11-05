@@ -133,15 +133,28 @@ jobs:
           tags: tag:ci
           args: --hostname=gh-rdp-runner --accept-routes
 
+      - name: Refresh PATH
+        shell: pwsh
+        run: |
+          $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+          $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+          $env:Path = "$machinePath;$userPath"
+          Write-Host "PATH updated."
+          Get-Command tailscale -ErrorAction SilentlyContinue
+
       - name: Get Tailscale IP
         id: tailscale
         shell: pwsh
         run: |
           $exe = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $exe)) {
-            Write-Error "tailscale.exe tidak ditemukan setelah action Tailscale"
+            $exe = "C:\Program Files (x86)\Tailscale\tailscale.exe"
+          }
+          if (-not (Test-Path $exe)) {
+            Write-Error "tailscale.exe tidak ditemukan di lokasi mana pun"
             exit 1
           }
+
           $ip = $null
           for ($i = 0; $i -lt 30; $i++) {
             Start-Sleep -Seconds 2
@@ -149,7 +162,7 @@ jobs:
             if ($ip) { break }
           }
           if (-not $ip) {
-            Write-Error "Tailscale IP tidak didapat"
+            Write-Error "Tailscale IP tidak didapat setelah 60s"
             exit 1
           }
           $ip = ($ip | Select-Object -First 1).Trim()
