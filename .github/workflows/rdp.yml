@@ -160,15 +160,21 @@ jobs:
           }
 
           Write-Host "Starting reverse tunnel..."
-          $proc = Start-Process -FilePath "ssh" -ArgumentList $sshArgs -PassThru -NoNewWindow
+          $proc = Start-Process -FilePath "ssh" -ArgumentList $sshArgs -PassThru -NoNewWindow `
+                    -RedirectStandardError "$env:TEMP\ssh_stderr.log" `
+                    -RedirectStandardOutput "$env:TEMP\ssh_stdout.log"
 
-          Start-Sleep -Seconds 10
-          if ($proc.HasExited) {
-            Write-Error "SSH tunnel gagal start (exit code: $($proc.ExitCode))"
+          [System.IO.File]::WriteAllText("$env:TEMP\ssh.pid", $proc.Id.ToString())
+
+          Start-Sleep -Seconds 15
+          $check = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+          if (-not $check) {
+            Write-Host "=== SSH stderr ==="
+            Get-Content "$env:TEMP\ssh_stderr.log" -ErrorAction SilentlyContinue
+            Write-Error "SSH tunnel gagal start (proses mati)"
             exit 1
           }
           Write-Host "SSH tunnel aktif (PID: $($proc.Id))"
-          $proc.Id | Out-File -FilePath "$env:TEMP\ssh.pid" -Encoding ascii
 
       - name: Print connection info
         shell: pwsh
@@ -196,12 +202,15 @@ jobs:
         run: |
           Write-Host "Memantau tunnel selama ~5h 50m..."
           $pidFile = "$env:TEMP\ssh.pid"
-          for ($i = 0; $i -lt 350; $i++) {
+          $tunnelPid = [int]([System.IO.File]::ReadAllText($pidFile).Trim())
+          Write-Host "Memantau PID: $tunnelPid"
+
+          for ($i = 1; $i -le 350; $i++) {
             Start-Sleep -Seconds 60
-            if (-not (Test-Path $pidFile)) { break }
-            $tunnelPid = Get-Content $pidFile
             $proc = Get-Process -Id $tunnelPid -ErrorAction SilentlyContinue
             if (-not $proc) {
+              Write-Host "=== SSH stderr (last 20 lines) ==="
+              Get-Content "$env:TEMP\ssh_stderr.log" -Tail 20 -ErrorAction SilentlyContinue
               Write-Error "SSH tunnel mati pada menit ke-$i. Runner akan berhenti."
               exit 1
             }
