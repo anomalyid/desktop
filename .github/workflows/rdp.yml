@@ -137,13 +137,23 @@ jobs:
       - name: Install Tailscale (direct amd64 MSI)
         shell: pwsh
         run: |
-          # Unduh MSI amd64 langsung dari Tailscale, bukan via winget
+          # 1. Pastikan layanan yang dibutuhkan Tailscale berjalan
+          $services = @("Dnscache", "iphlpsvc", "netprofm", "WinHttpAutoProxySvc")
+          foreach ($svc in $services) {
+              $status = Get-Service -Name $svc -ErrorAction SilentlyContinue
+              if ($status -and $status.Status -ne 'Running') {
+                  Write-Host "Starting service: $svc"
+                  Start-Service -Name $svc -ErrorAction SilentlyContinue
+              }
+          }
+
+          # 2. Unduh MSI amd64 langsung dari Tailscale
           $msiUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
           $msiPath = "$env:TEMP\tailscale-amd64.msi"
           Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
           Write-Host "Downloaded MSI: $((Get-Item $msiPath).Length) bytes"
 
-          # Install silent dengan parameter yang benar
+          # 3. Install silent
           $args = @(
             "/i", "`"$msiPath`"",
             "/qn", "/norestart",
@@ -156,7 +166,7 @@ jobs:
             exit 1
           }
 
-          # Verifikasi path
+          # 4. Verifikasi path
           $exe = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $exe)) {
             $alt = "C:\Program Files (x86)\Tailscale\tailscale.exe"
