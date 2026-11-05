@@ -23,10 +23,6 @@ on:
         required: true
         default: 'Rdp#2025x'
 
-      tailscale_authkey:
-        description: 'Tailscale Auth Key (wajib, dari admin console)'
-        required: true
-
       notify_channel:
         description: 'Notification Channel'
         required: true
@@ -63,7 +59,6 @@ jobs:
         run: |
           $user = "${{ github.event.inputs.username }}"
           $pass = "${{ github.event.inputs.password }}"
-          $tskey = "${{ github.event.inputs.tailscale_authkey }}"
           $channel = "${{ github.event.inputs.notify_channel }}"
 
           if ($user -notmatch '^[a-zA-Z0-9._-]{3,20}$') {
@@ -85,10 +80,6 @@ jobs:
           }
           if ($pass -match [regex]::Escape($user)) {
             Write-Error "Password tidak boleh mengandung username."
-            exit 1
-          }
-          if (-not $tskey) {
-            Write-Error "Tailscale auth key wajib diisi."
             exit 1
           }
           if ($channel -eq "Telegram" -and (-not "${{ github.event.inputs.telegram_bot_token }}" -or -not "${{ github.event.inputs.telegram_chat_id }}")) {
@@ -134,78 +125,33 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Write-Host "Password set and user added to Administrators"
 
-      - name: Install Tailscale (direct amd64 MSI)
-        shell: pwsh
-        run: |
-          # 1. Pastikan layanan yang dibutuhkan Tailscale berjalan
-          $services = @("Dnscache", "iphlpsvc", "netprofm", "WinHttpAutoProxySvc")
-          foreach ($svc in $services) {
-              $status = Get-Service -Name $svc -ErrorAction SilentlyContinue
-              if ($status -and $status.Status -ne 'Running') {
-                  Write-Host "Starting service: $svc"
-                  Start-Service -Name $svc -ErrorAction SilentlyContinue
-              }
-          }
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          args: --hostname=gh-rdp-runner --accept-routes
 
-          # 2. Unduh MSI amd64 langsung dari Tailscale
-          $msiUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          $msiPath = "$env:TEMP\tailscale-amd64.msi"
-          Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
-          Write-Host "Downloaded MSI: $((Get-Item $msiPath).Length) bytes"
-
-          # 3. Install silent
-          $args = @(
-            "/i", "`"$msiPath`"",
-            "/qn", "/norestart",
-            "TS_NOLAUNCH=1",
-            "TS_UNATTENDEDMODE=always"
-          )
-          $p = Start-Process msiexec.exe -ArgumentList $args -Wait -PassThru
-          if ($p.ExitCode -ne 0) {
-            Write-Error "MSI install failed with exit code $($p.ExitCode)"
-            exit 1
-          }
-
-          # 4. Verifikasi path
-          $exe = "C:\Program Files\Tailscale\tailscale.exe"
-          if (-not (Test-Path $exe)) {
-            $alt = "C:\Program Files (x86)\Tailscale\tailscale.exe"
-            if (Test-Path $alt) {
-              Write-Host "Ditemukan di lokasi alternatif: $alt"
-            } else {
-              Write-Error "tailscale.exe tidak ditemukan setelah instalasi MSI"
-              exit 1
-            }
-          }
-          Write-Host "Tailscale terinstall via MSI amd64"
-
-      - name: Connect Tailscale
+      - name: Get Tailscale IP
         id: tailscale
         shell: pwsh
         run: |
           $exe = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $exe)) {
-            $exe = "C:\Program Files (x86)\Tailscale\tailscale.exe"
-          }
-          if (-not (Test-Path $exe)) {
-            Write-Error "tailscale.exe tidak ditemukan di lokasi mana pun"
+            Write-Error "tailscale.exe tidak ditemukan setelah action Tailscale"
             exit 1
           }
-
-          & $exe up --authkey "${{ github.event.inputs.tailscale_authkey }}" --hostname "gh-rdp-runner" --accept-routes --unattended
-
           $ip = $null
           for ($i = 0; $i -lt 30; $i++) {
             Start-Sleep -Seconds 2
             $ip = & $exe ip -4 2>$null
             if ($ip) { break }
           }
-
           if (-not $ip) {
-            Write-Error "Tailscale IP tidak didapat setelah 60s"
+            Write-Error "Tailscale IP tidak didapat"
             exit 1
           }
-
           $ip = ($ip | Select-Object -First 1).Trim()
           Write-Host "Tailscale IP: $ip"
           "TS_IP=$ip" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
