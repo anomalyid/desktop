@@ -1,253 +1,47 @@
-name: RDP
+name: RDP-Tailscale
 
 on:
   workflow_dispatch:
     inputs:
-      windows_version:
-        description: 'Windows Version'
+      tailscale_authkey:
+        description: 'Tailscale Auth Key (dari admin console)'
         required: true
-        default: 'windows-latest'
-        type: choice
-        options:
-          - windows-latest
-          - windows-2025
-          - windows-2022
-
-      username:
-        description: 'Username (menggantikan runneradmin, 3-20 karakter)'
-        required: true
-        default: 'admin'
-
       password:
-        description: 'Password (min 8 char, 3 dari: besar/kecil/angka/simbol, tanpa username)'
+        description: 'Password RDP (min 8 char, kompleks)'
         required: true
         default: 'Rdp#2025x'
 
-      ngrok_token:
-        description: 'Ngrok Auth Token (wajib, dari dashboard.ngrok.com)'
-        required: true
-
-      notify_channel:
-        description: 'Notification Channel'
-        required: true
-        default: 'None'
-        type: choice
-        options:
-          - 'None'
-          - 'Telegram'
-          - 'Discord'
-
-      telegram_bot_token:
-        description: 'Telegram Bot Token (isi jika pilih Telegram)'
-        required: false
-        default: ''
-
-      telegram_chat_id:
-        description: 'Telegram Chat ID (isi jika pilih Telegram)'
-        required: false
-        default: ''
-
-      discord_webhook:
-        description: 'Discord Webhook URL (isi jika pilih Discord)'
-        required: false
-        default: ''
-
 jobs:
   build:
-    runs-on: ${{ github.event.inputs.windows_version }}
+    runs-on: windows-latest
     timeout-minutes: 350
-
     steps:
-      - name: Validate inputs
-        shell: pwsh
-        run: |
-          $user = "${{ github.event.inputs.username }}"
-          $pass = "${{ github.event.inputs.password }}"
-          $ngrok = "${{ github.event.inputs.ngrok_token }}"
-          $channel = "${{ github.event.inputs.notify_channel }}"
-
-          if ($user -notmatch '^[a-zA-Z0-9._-]{3,20}$') {
-            Write-Error "Username tidak valid. Hanya huruf, angka, titik, underscore, strip. 3-20 karakter."
-            exit 1
-          }
-          if ($pass.Length -lt 8) {
-            Write-Error "Password minimal 8 karakter (kebijakan Windows)."
-            exit 1
-          }
-          $hasUpper  = $pass -cmatch '[A-Z]'
-          $hasLower  = $pass -cmatch '[a-z]'
-          $hasDigit  = $pass -match '[0-9]'
-          $hasSymbol = $pass -match '[^a-zA-Z0-9]'
-          $categories = @($hasUpper, $hasLower, $hasDigit, $hasSymbol) | Where-Object { $_ }
-          if ($categories.Count -lt 3) {
-            Write-Error "Password harus punya minimal 3 dari: huruf besar, huruf kecil, angka, simbol."
-            exit 1
-          }
-          if ($pass -match [regex]::Escape($user)) {
-            Write-Error "Password tidak boleh mengandung username."
-            exit 1
-          }
-          if (-not $ngrok) {
-            Write-Error "Ngrok token wajib diisi."
-            exit 1
-          }
-          if ($channel -eq "Telegram" -and (-not "${{ github.event.inputs.telegram_bot_token }}" -or -not "${{ github.event.inputs.telegram_chat_id }}")) {
-            Write-Error "Pilih Telegram tapi bot token / chat id kosong."
-            exit 1
-          }
-          if ($channel -eq "Discord" -and -not "${{ github.event.inputs.discord_webhook }}") {
-            Write-Error "Pilih Discord tapi webhook kosong."
-            exit 1
-          }
-          Write-Host "Input valid. user=$user pass_len=$($pass.Length) channel=$channel"
-
-      - name: Enable RDP
+      - name: Enable RDP & Set Password
         shell: pwsh
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
-          Write-Host "RDP enabled on port 3389"
+          Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString "${{ github.event.inputs.password }}" -AsPlainText -Force)
+          Add-LocalGroupMember -Group "Administrators" -Member "runneradmin"
 
-      - name: Rename user
+      - name: Install Tailscale
         shell: pwsh
         run: |
-          $newUser = "${{ github.event.inputs.username }}"
-          if ($newUser -ne "runneradmin") {
-            if (Get-LocalUser -Name $newUser -ErrorAction SilentlyContinue) {
-              Write-Host "User $newUser already exists, skipping rename"
-            } else {
-              Rename-LocalUser -Name "runneradmin" -NewName $newUser
-              Write-Host "Renamed runneradmin -> $newUser"
-            }
-          } else {
-            Write-Host "Keeping default runneradmin"
-          }
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale-setup.exe"
+          Start-Process -FilePath ".\tailscale-setup.exe" -ArgumentList "/quiet" -Wait
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey ${{ github.event.inputs.tailscale_authkey }} --hostname "gh-rdp-runner" --accept-routes
 
-      - name: Set password
+      - name: Show Tailscale IP
         shell: pwsh
         run: |
-          $user = "${{ github.event.inputs.username }}"
-          $pass = ConvertTo-SecureString -AsPlainText "${{ github.event.inputs.password }}" -Force
-          Set-LocalUser -Name $user -Password $pass
-          Set-LocalUser -Name $user -PasswordNeverExpires $true
-          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
-          Write-Host "Password set and user added to Administrators"
-
-      - name: Install ngrok
-        shell: pwsh
-        run: |
-          $url = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
-          Invoke-WebRequest -Uri $url -OutFile ngrok.zip -UseBasicParsing
-          Expand-Archive ngrok.zip -Force
-          .\ngrok\ngrok.exe config add-authtoken ${{ github.event.inputs.ngrok_token }}
-          Write-Host "ngrok installed and authenticated"
-
-      - name: Start tunnel
-        id: tunnel
-        shell: pwsh
-        run: |
-          Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389 --log=stdout" -NoNewWindow
-
-          $tunnel = $null
-          for ($i = 0; $i -lt 20; $i++) {
-            Start-Sleep -Seconds 2
-            try {
-              $api = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 5
-              $tunnel = $api.tunnels | Where-Object { $_.proto -eq "tcp" } | Select-Object -First 1
-              if ($tunnel) { break }
-            } catch {}
-          }
-
-          if (-not $tunnel) {
-            Write-Error "ngrok tunnel failed to start within 40s"
-            exit 1
-          }
-
-          $publicUrl = $tunnel.public_url -replace "^tcp://", ""
-          Write-Host "Tunnel ready: $publicUrl"
-          "RDP_HOST=$publicUrl" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Print connection info
-        shell: pwsh
-        run: |
-          $host = "${{ steps.tunnel.outputs.RDP_HOST }}"
+          $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           Write-Host "========================================"
-          Write-Host "      RDP CONNECTION DETAILS"
+          Write-Host "RDP Host (Tailscale IP): $ip"
+          Write-Host "Username: runneradmin"
+          Write-Host "Password: ${{ github.event.inputs.password }}"
           Write-Host "========================================"
-          Write-Host "  Host     : $host"
-          Write-Host "  Username : ${{ github.event.inputs.username }}"
-          Write-Host "  Password : ${{ github.event.inputs.password }}"
-          Write-Host "----------------------------------------"
-          Write-Host "  Windows  : ${{ github.event.inputs.windows_version }}"
-          Write-Host "  Expires  : 5 hours 50 minutes from now"
-          Write-Host "========================================"
-          Write-Host ""
-          Write-Host "How to connect:"
-          Write-Host "  Windows   : mstsc -> $host"
-          Write-Host "  Android   : Microsoft Remote Desktop -> $host"
-          Write-Host "  iOS/macOS : Windows App -> $host"
-          Write-Host "========================================"
+          Write-Host "Connect via Windows App to $ip"
 
-      - name: Send Telegram notification
-        if: ${{ github.event.inputs.notify_channel == 'Telegram' }}
+      - name: Keep Alive
         shell: pwsh
-        run: |
-          $text = @"
-          *RDP Ready*
-
-          Host: ``${{ steps.tunnel.outputs.RDP_HOST }}``
-          Username: ``${{ github.event.inputs.username }}``
-          Password: ``${{ github.event.inputs.password }}``
-          Windows: ${{ github.event.inputs.windows_version }}
-          Expires: ~5h 50m
-          "@
-
-          $body = @{
-            chat_id = "${{ github.event.inputs.telegram_chat_id }}"
-            text = $text
-            parse_mode = "Markdown"
-          } | ConvertTo-Json
-
-          try {
-            Invoke-RestMethod -Uri "https://api.telegram.org/bot${{ github.event.inputs.telegram_bot_token }}/sendMessage" `
-              -Method Post `
-              -ContentType "application/json" `
-              -Body $body | Out-Null
-            Write-Host "Telegram notification sent"
-          } catch {
-            Write-Host "Telegram failed: $($_.Exception.Message)"
-          }
-
-      - name: Send Discord notification
-        if: ${{ github.event.inputs.notify_channel == 'Discord' }}
-        shell: pwsh
-        run: |
-          $content = @"
-          **RDP Ready**
-
-          Host: ``${{ steps.tunnel.outputs.RDP_HOST }}``
-          Username: ``${{ github.event.inputs.username }}``
-          Password: ``${{ github.event.inputs.password }}``
-          Windows: ${{ github.event.inputs.windows_version }}
-          Expires: ~5h 50m
-          "@
-
-          $body = @{ content = $content } | ConvertTo-Json
-
-          try {
-            Invoke-RestMethod -Uri "${{ github.event.inputs.discord_webhook }}" `
-              -Method Post `
-              -ContentType "application/json" `
-              -Body $body | Out-Null
-            Write-Host "Discord notification sent"
-          } catch {
-            Write-Host "Discord failed: $($_.Exception.Message)"
-          }
-
-      - name: Keep alive
-        shell: pwsh
-        run: |
-          Write-Host "Session active. RDP will remain available for ~5h 50m."
-          Write-Host "Host: ${{ steps.tunnel.outputs.RDP_HOST }}"
-          Start-Sleep -Seconds 19800
+        run: Start-Sleep -Seconds 19800
